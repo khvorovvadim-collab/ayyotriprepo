@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import csv
-import math
+import io
 import sys
 from pathlib import Path
 
@@ -12,9 +12,8 @@ import pymupdf
 from PIL import Image, ImageDraw
 
 from build_capsules import (
-    FONT_BOLD,
-    FONT_REGULAR,
     Item,
+    RENDER_SCALE,
     fit_image,
     get_font,
     parse_items,
@@ -132,6 +131,26 @@ LOOKS = {
 }
 
 
+def repair_grouped_outerwear(doc: pymupdf.Document, items: list[Item]) -> None:
+    """Crop three source garments that share one embedded PDF image."""
+    page = doc[0]
+    pixmap = page.get_pixmap(
+        matrix=pymupdf.Matrix(RENDER_SCALE, RENDER_SCALE),
+        alpha=False,
+    )
+    page_image = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
+    affected = [item for item in items if item.page == 1 and item.row == 6 and item.col in {5, 6, 7}]
+    for item in affected:
+        center_x = (item.label_bbox[0] + item.label_bbox[2]) / 2
+        box = (
+            int((center_x - 27) * RENDER_SCALE),
+            int(395 * RENDER_SCALE),
+            int((center_x + 27) * RENDER_SCALE),
+            int((item.label_bbox[1] - 2) * RENDER_SCALE),
+        )
+        item.image = page_image.crop(box)
+
+
 def paste_centered(
     board: Image.Image,
     image: Image.Image,
@@ -206,6 +225,7 @@ def main() -> None:
     doc = pymupdf.open(PDF_PATH)
     items = parse_items(doc)
     render_item_images(doc, items)
+    repair_grouped_outerwear(doc, items)
     by_position = {(item.page, item.row, item.col): item for item in items}
 
     boards: list[Image.Image] = []
