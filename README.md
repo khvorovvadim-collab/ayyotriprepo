@@ -28,31 +28,23 @@
 Все команды следует выполнять на сервере с доступом к SQL Server. Первые три
 режима не отправляют сообщения в Mattermost.
 
-### 1. Локальные тесты
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\PowerBI_ALERT_Mattermost.ps1 -Mode Test
-```
+### 1. Автономные тесты
 
 Тесты не подключаются к SQL и не выполняют HTTP-запросы. Они проверяют правила
 формирования алертов, совместное событие Error+Timeout, границу таймаута,
 UTF-8, отсутствие webhook в коде и безопасный режим по умолчанию.
 
-#### Запуск теста через SQL Server Agent
-
-Сначала скопируйте скрипт на сервер, например:
+Скрипт должен находиться по полному пути:
 
 ```text
-F:\Project\PowerBI_ALERT_Mattermost.ps1
+F:\Project\power_shell\PowerBI_ALERT_Mattermost.ps1
 ```
 
 Учётная запись SQL Server Agent (`ALKOR\sqlagent`) должна иметь права чтения и
-выполнения файла. В шаге задания типа **PowerShell** используйте абсолютный
-путь:
+выполнения файла. Код шага задания типа **PowerShell**:
 
 ```powershell
-$scriptPath = 'F:\Project\PowerBI_ALERT_Mattermost.ps1'
+$scriptPath = 'F:\Project\power_shell\PowerBI_ALERT_Mattermost.ps1'
 
 if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
     throw "Скрипт не найден: $scriptPath"
@@ -74,13 +66,20 @@ if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
 
 ### 2. Диагностика без изменений в SQL и без HTTP
 
+Код отдельного шага задания типа **PowerShell**:
+
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\PowerBI_ALERT_Mattermost.ps1 `
-  -Mode Diagnose `
-  -SqlServer REPORT-S `
-  -SqlDatabase ra `
-  -LogFile C:\Temp\DashboardAlerts-diagnostic.log
+$scriptPath = 'F:\Project\power_shell\PowerBI_ALERT_Mattermost.ps1'
+
+if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+    throw "Скрипт не найден: $scriptPath"
+}
+
+& $scriptPath `
+    -Mode Diagnose `
+    -SqlServer REPORT-S `
+    -SqlDatabase ra `
+    -LogFile 'F:\Project\Logs\DashboardAlerts-diagnostic.log'
 ```
 
 Режим читает источник и журнал, после чего выводит:
@@ -98,11 +97,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 Сначала сделайте резервную копию существующей таблицы. Затем выполните:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\PowerBI_ALERT_Mattermost.ps1 `
-  -Mode Initialize `
-  -SqlServer REPORT-S `
-  -SqlDatabase ra
+$scriptPath = 'F:\Project\power_shell\PowerBI_ALERT_Mattermost.ps1'
+
+if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+    throw "Скрипт не найден: $scriptPath"
+}
+
+& $scriptPath `
+    -Mode Initialize `
+    -SqlServer REPORT-S `
+    -SqlDatabase ra
 ```
 
 Режим создаёт или дополняет `[pbix].[AlertHistory]`, но ничего не отправляет.
@@ -136,12 +140,17 @@ $env:POWERBI_ALERT_MATTERMOST_WEBHOOK = "https://mattermost.example/hooks/NEW_SE
 с небольшим лимитом:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\PowerBI_ALERT_Mattermost.ps1 `
-  -Mode Send `
-  -SqlServer REPORT-S `
-  -SqlDatabase ra `
-  -Limit 1
+$scriptPath = 'F:\Project\power_shell\PowerBI_ALERT_Mattermost.ps1'
+
+if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+    throw "Скрипт не найден: $scriptPath"
+}
+
+& $scriptPath `
+    -Mode Send `
+    -SqlServer REPORT-S `
+    -SqlDatabase ra `
+    -Limit 1
 ```
 
 Проверьте одну запись в Mattermost и соответствующую строку со статусом `Sent`
