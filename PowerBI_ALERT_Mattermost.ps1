@@ -9,6 +9,7 @@
       Test       - локальные тесты без SQL и HTTP;
       Diagnose   - только чтение SQL и вывод потенциальных алертов;
       Initialize - создание/миграция таблицы журнала без отправки;
+      Baseline   - регистрация текущей очереди без отправки;
       Send       - реальная отправка (требует явного режима и webhook).
 
     Запись со статусом Pending создаётся ДО HTTP-запроса. Поэтому ошибка
@@ -18,7 +19,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("Test", "Diagnose", "Initialize", "Send")]
+    [ValidateSet("Test", "Diagnose", "Initialize", "Baseline", "Send")]
     [string]$Mode = "Diagnose",
 
     [string]$SqlServer = "REPORT-S",
@@ -204,7 +205,7 @@ BEGIN
         [SentDate] DATETIME2(0) NULL,
         [LastError] NVARCHAR(4000) NULL,
         CONSTRAINT [CK_AlertHistory_DeliveryStatus]
-            CHECK ([DeliveryStatus] IN ('Pending', 'Sent', 'Failed', 'Unknown'))
+            CHECK ([DeliveryStatus] IN ('Pending', 'Sent', 'Failed', 'Unknown', 'Suppressed'))
     );
 END
 ELSE
@@ -276,7 +277,7 @@ BEGIN
     UPDATE [pbix].[AlertHistory]
     SET [DeliveryStatus] = 'Unknown'
     WHERE [DeliveryStatus] IS NULL
-       OR [DeliveryStatus] NOT IN ('Pending', 'Sent', 'Failed', 'Unknown');
+       OR [DeliveryStatus] NOT IN ('Pending', 'Sent', 'Failed', 'Unknown', 'Suppressed');
 
     UPDATE [pbix].[AlertHistory]
     SET [CreatedDate] = COALESCE([SentDate], SYSUTCDATETIME())
@@ -295,7 +296,7 @@ BEGIN
 
     ALTER TABLE [pbix].[AlertHistory] WITH CHECK
         ADD CONSTRAINT [CK_AlertHistory_DeliveryStatus]
-        CHECK ([DeliveryStatus] IN ('Pending', 'Sent', 'Failed', 'Unknown'));
+        CHECK ([DeliveryStatus] IN ('Pending', 'Sent', 'Failed', 'Unknown', 'Suppressed'));
 END;
 
 IF EXISTS (
@@ -426,6 +427,7 @@ SELECT
           AND definition LIKE N'%Sent%'
           AND definition LIKE N'%Failed%'
           AND definition LIKE N'%Unknown%'
+          AND definition LIKE N'%Suppressed%'
     ) THEN 1 ELSE 0 END AS SchemaReady,
     CASE WHEN EXISTS (
         SELECT 1
@@ -496,7 +498,8 @@ BEGIN
         CAST(0 AS BIGINT) AS DuplicateKeys,
         CAST(0 AS BIGINT) AS PendingRows,
         CAST(0 AS BIGINT) AS FailedRows,
-        CAST(0 AS BIGINT) AS UnknownRows;
+        CAST(0 AS BIGINT) AS UnknownRows,
+        CAST(0 AS BIGINT) AS SuppressedRows;
 END
 ELSE
 BEGIN
@@ -525,6 +528,10 @@ BEGIN
             ' + CASE WHEN @HasStatus = 1
                 THEN N'SUM(CASE WHEN [DeliveryStatus] = ''Unknown'' THEN 1 ELSE 0 END)'
                 ELSE N'CAST(0 AS BIGINT)' END + N' AS UnknownRows
+            ,
+            ' + CASE WHEN @HasStatus = 1
+                THEN N'SUM(CASE WHEN [DeliveryStatus] = ''Suppressed'' THEN 1 ELSE 0 END)'
+                ELSE N'CAST(0 AS BIGINT)' END + N' AS SuppressedRows
         FROM [pbix].[AlertHistory];';
     EXEC sys.sp_executesql @Sql;
 END;
@@ -541,6 +548,7 @@ END;
                 PendingRows   = if ($reader.IsDBNull(2)) { 0L } else { [long]$reader["PendingRows"] }
                 FailedRows    = if ($reader.IsDBNull(3)) { 0L } else { [long]$reader["FailedRows"] }
                 UnknownRows   = if ($reader.IsDBNull(4)) { 0L } else { [long]$reader["UnknownRows"] }
+                SuppressedRows = if ($reader.IsDBNull(5)) { 0L } else { [long]$reader["SuppressedRows"] }
             }
         }
         finally {
@@ -607,6 +615,61 @@ BEGIN
     VALUES (
         @SubscriptionID, @StartTime, @EndTime, @DurationSeconds, @AlertType,
         'Pending', @ReportName, SYSUTCDATETIME(), SYSUTCDATETIME(), NULL, NULL
+    );
+    SELECT CAST(1 AS int);
+END
+ELSE
+    SELECT CAST(0 AS int);
+
+COMMIT TRANSACTION;
+"@
+
+    $command = [System.Data.SqlClient.SqlCommand]::new($query, $Connection)
+    try {
+        [void](Add-SqlParameter $command "@SubscriptionID" ([System.Data.SqlDbType]::UniqueIdentifier) $SubscriptionID)
+        [void](Add-SqlParameter $command "@StartTime" ([System.Data.SqlDbType]::DateTime2) $StartTime 0 3)
+        [void](Add-SqlParameter $command "@EndTime" ([System.Data.SqlDbType]::DateTime2) $EndTime 0 3)
+        [void](Add-SqlParameter $command "@DurationSeconds" ([System.Data.SqlDbType]::Int) $DurationSeconds)
+        [void](Add-SqlParameter $command "@AlertType" ([System.Data.SqlDbType]::VarChar) $AlertType 20)
+        [void](Add-SqlParameter $command "@ReportName" ([System.Data.SqlDbType]::NVarChar) $ReportName 512)
+        return ([int]$command.ExecuteScalar() -eq 1)
+    }
+    finally {
+        $command.Dispose()
+    }
+}
+
+function Register-BaselineAlert {
+    param(
+        [Parameter(Mandatory = $true)][System.Data.SqlClient.SqlConnection]$Connection,
+        [Parameter(Mandatory = $true)][guid]$SubscriptionID,
+        [Parameter(Mandatory = $true)][datetime]$StartTime,
+        [Parameter(Mandatory = $true)][datetime]$EndTime,
+        [Parameter(Mandatory = $true)][int]$DurationSeconds,
+        [Parameter(Mandatory = $true)][string]$AlertType,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ReportName
+    )
+
+    $query = @"
+SET XACT_ABORT ON;
+BEGIN TRANSACTION;
+
+IF NOT EXISTS (
+    SELECT 1
+    FROM [pbix].[AlertHistory] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [SubscriptionID] = @SubscriptionID
+      AND [StartTime] = @StartTime
+      AND [AlertType] = @AlertType
+)
+BEGIN
+    INSERT INTO [pbix].[AlertHistory] (
+        [SubscriptionID], [StartTime], [EndTime], [DurationSeconds], [AlertType],
+        [DeliveryStatus], [ReportName], [CreatedDate], [LastAttemptDate], [SentDate], [LastError]
+    )
+    VALUES (
+        @SubscriptionID, @StartTime, @EndTime, @DurationSeconds, @AlertType,
+        'Suppressed', @ReportName, SYSUTCDATETIME(), SYSUTCDATETIME(), NULL,
+        N'Baseline: алерт существовал до включения отправки.'
     );
     SELECT CAST(1 AS int);
 END
@@ -801,13 +864,16 @@ function Invoke-SelfTests {
     $preservedTable = & { return ,$testTable }
     Assert-Equal "DataTable не разворачивается в DataRow" "System.Data.DataTable" $preservedTable.GetType().FullName
 
+    Assert-Equal "Режим Baseline доступен" $true ([regex]::IsMatch($scriptText, 'ValidateSet\([^\)]*"Baseline"'))
+    Assert-Equal "Baseline имеет отдельный статус" $true ([regex]::IsMatch($scriptText, "DeliveryStatus.+Suppressed", [System.Text.RegularExpressions.RegexOptions]::Singleline))
+
     if ($failures.Count -gt 0) {
         foreach ($failure in $failures) {
             Write-Log "FAIL: $failure" "ERROR"
         }
         throw "Провалено тестов: $($failures.Count)."
     }
-    Write-Log "Все локальные тесты пройдены: 12."
+    Write-Log "Все локальные тесты пройдены: 14."
 }
 
 function Invoke-Diagnostics {
@@ -820,6 +886,7 @@ function Invoke-Diagnostics {
         PendingRows   = 0L
         FailedRows    = 0L
         UnknownRows   = 0L
+        SuppressedRows = 0L
     }
     if ($schema.TableExists -and $schema.HasKeyColumns) {
         $history = Get-HistoryDiagnostics $Connection
@@ -842,7 +909,7 @@ function Invoke-Diagnostics {
     Write-Log "Диагностика завершена без изменений в SQL и без HTTP-запросов. Файловый диагностический лог обновлён."
     Write-Log "Источник: строк=$($rows.Rows.Count), потенциальных алертов=$candidateCount, некорректных строк=$invalidCount."
     Write-Log "AlertHistory: существует=$($schema.TableExists), схема готова=$($schema.SchemaReady), уникальный индекс корректен=$($schema.UniqueIndexExists)."
-    Write-Log "AlertHistory: строк=$($history.TotalRows), ключей-дублей=$($history.DuplicateKeys), Pending=$($history.PendingRows), Failed=$($history.FailedRows), Unknown=$($history.UnknownRows)."
+    Write-Log "AlertHistory: строк=$($history.TotalRows), ключей-дублей=$($history.DuplicateKeys), Pending=$($history.PendingRows), Failed=$($history.FailedRows), Unknown=$($history.UnknownRows), Suppressed=$($history.SuppressedRows)."
 
     if (-not $schema.SchemaReady -or -not $schema.UniqueIndexExists) {
         Write-Log "Перед Send выполните режим Initialize." "WARN"
@@ -850,6 +917,53 @@ function Invoke-Diagnostics {
     if ($history.DuplicateKeys -gt 0) {
         Write-Log "Initialize остановится до ручной проверки и удаления дублей." "WARN"
     }
+}
+
+function Invoke-Baseline {
+    param([Parameter(Mandatory = $true)][System.Data.SqlClient.SqlConnection]$Connection)
+
+    $schema = Test-HistoryTable $Connection
+    if (-not $schema.SchemaReady -or -not $schema.UniqueIndexExists) {
+        throw "Таблица журнала не инициализирована. Сначала выполните -Mode Initialize."
+    }
+
+    Lock-Dispatcher $Connection
+    $rows = Get-SourceRows $Connection
+    $registeredCount = 0
+    $skippedCount = 0
+    $invalidCount = 0
+
+    foreach ($row in $rows.Rows) {
+        try {
+            $candidate = ConvertTo-AlertCandidate $row
+        }
+        catch {
+            $invalidCount++
+            Write-Log "Исходная запись не добавлена в baseline: $($_.Exception.Message)" "ERROR"
+            continue
+        }
+
+        $alertTypes = Get-AlertTypes $candidate.Status $candidate.DurationSeconds $TimeoutThresholdSeconds
+        foreach ($alertType in $alertTypes) {
+            $registered = Register-BaselineAlert `
+                -Connection $Connection `
+                -SubscriptionID $candidate.SubscriptionID `
+                -StartTime $candidate.StartTime `
+                -EndTime $candidate.EndTime `
+                -DurationSeconds $candidate.DurationSeconds `
+                -AlertType $alertType `
+                -ReportName $candidate.ReportName
+
+            if ($registered) {
+                $registeredCount++
+            }
+            else {
+                $skippedCount++
+            }
+        }
+    }
+
+    Write-Log "Baseline завершён без HTTP-запросов: зарегистрировано=$registeredCount, уже было в журнале=$skippedCount, некорректных строк=$invalidCount."
 }
 
 function Invoke-Delivery {
@@ -973,6 +1087,9 @@ try {
         "Initialize" {
             Initialize-HistoryTable $connection
             Write-Log "Таблица [pbix].[AlertHistory] инициализирована. Сообщения не отправлялись."
+        }
+        "Baseline" {
+            Invoke-Baseline $connection
         }
         "Send" {
             Invoke-Delivery $connection
