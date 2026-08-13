@@ -101,7 +101,8 @@ function Add-SqlParameter {
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][System.Data.SqlDbType]$Type,
         [Parameter(Mandatory = $true)][object]$Value,
-        [int]$Size = 0
+        [int]$Size = 0,
+        [int]$Scale = -1
     )
 
     $parameter = if ($Size -gt 0) {
@@ -111,6 +112,9 @@ function Add-SqlParameter {
         $Command.Parameters.Add($Name, $Type)
     }
     $parameter.Value = $Value
+    if ($Scale -ge 0) {
+        $parameter.Scale = [byte]$Scale
+    }
     return $parameter
 }
 
@@ -613,8 +617,8 @@ COMMIT TRANSACTION;
     $command = [System.Data.SqlClient.SqlCommand]::new($query, $Connection)
     try {
         [void](Add-SqlParameter $command "@SubscriptionID" ([System.Data.SqlDbType]::UniqueIdentifier) $SubscriptionID)
-        [void](Add-SqlParameter $command "@StartTime" ([System.Data.SqlDbType]::DateTime2) $StartTime)
-        [void](Add-SqlParameter $command "@EndTime" ([System.Data.SqlDbType]::DateTime2) $EndTime)
+        [void](Add-SqlParameter $command "@StartTime" ([System.Data.SqlDbType]::DateTime2) $StartTime 0 3)
+        [void](Add-SqlParameter $command "@EndTime" ([System.Data.SqlDbType]::DateTime2) $EndTime 0 3)
         [void](Add-SqlParameter $command "@DurationSeconds" ([System.Data.SqlDbType]::Int) $DurationSeconds)
         [void](Add-SqlParameter $command "@AlertType" ([System.Data.SqlDbType]::VarChar) $AlertType 20)
         [void](Add-SqlParameter $command "@ReportName" ([System.Data.SqlDbType]::NVarChar) $ReportName 512)
@@ -653,7 +657,7 @@ SELECT @@ROWCOUNT;
         [void](Add-SqlParameter $command "@DeliveryStatus" ([System.Data.SqlDbType]::VarChar) $(if ($Succeeded) { "Sent" } else { "Unknown" }) 20)
         [void](Add-SqlParameter $command "@LastError" ([System.Data.SqlDbType]::NVarChar) $(if ($ErrorMessage) { $ErrorMessage } else { [DBNull]::Value }) 4000)
         [void](Add-SqlParameter $command "@SubscriptionID" ([System.Data.SqlDbType]::UniqueIdentifier) $SubscriptionID)
-        [void](Add-SqlParameter $command "@StartTime" ([System.Data.SqlDbType]::DateTime2) $StartTime)
+        [void](Add-SqlParameter $command "@StartTime" ([System.Data.SqlDbType]::DateTime2) $StartTime 0 3)
         [void](Add-SqlParameter $command "@AlertType" ([System.Data.SqlDbType]::VarChar) $AlertType 20)
         if ([int]$command.ExecuteScalar() -ne 1) {
             throw "Не удалось изменить статус Pending для $SubscriptionID/$StartTime/$AlertType."
