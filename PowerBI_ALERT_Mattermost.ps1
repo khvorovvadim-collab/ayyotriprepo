@@ -224,10 +224,16 @@ BEGIN
     )
         ALTER TABLE [pbix].[AlertHistory] DROP CONSTRAINT [CK_AlertHistory_DeliveryStatus];
 
-    IF COL_LENGTH(N'pbix.AlertHistory', N'Id') IS NULL
-        THROW 51006, 'В AlertHistory отсутствует обязательная identity-колонка Id.', 1;
-    IF COLUMNPROPERTY(OBJECT_ID(N'[pbix].[AlertHistory]'), N'Id', 'IsIdentity') <> 1
-        THROW 51007, 'Колонка AlertHistory.Id должна быть IDENTITY.', 1;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM sys.columns AS c
+        JOIN sys.types AS t ON t.user_type_id = c.user_type_id
+        WHERE c.object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
+          AND c.name = N'Id'
+          AND t.name = N'int'
+          AND c.is_identity = 1
+    )
+        THROW 51006, 'AlertHistory.Id должна существовать и иметь тип INT IDENTITY.', 1;
     IF COL_LENGTH(N'pbix.AlertHistory', N'SubscriptionID') IS NULL
         THROW 51001, 'В AlertHistory отсутствует обязательная колонка SubscriptionID.', 1;
     IF COL_LENGTH(N'pbix.AlertHistory', N'StartTime') IS NULL
@@ -374,9 +380,14 @@ SELECT
     CASE WHEN OBJECT_ID(N'[pbix].[AlertHistory]', N'U') IS NULL THEN 0 ELSE 1 END AS TableExists,
     CASE WHEN 3 = (
         SELECT COUNT(*)
-        FROM sys.columns
-        WHERE object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
-          AND name IN (N'SubscriptionID', N'StartTime', N'AlertType')
+        FROM sys.columns AS c
+        JOIN sys.types AS t ON t.user_type_id = c.user_type_id
+        WHERE c.object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
+          AND (
+              (c.name = N'SubscriptionID' AND t.name = N'uniqueidentifier')
+              OR (c.name = N'StartTime' AND t.name IN (N'datetime', N'datetime2'))
+              OR (c.name = N'AlertType' AND t.name IN (N'varchar', N'nvarchar'))
+          )
     ) THEN 1 ELSE 0 END AS HasKeyColumns,
     CASE WHEN 12 = (
         SELECT COUNT(*)
@@ -390,12 +401,12 @@ SELECT
               OR (c.name = N'DurationSeconds' AND t.name = N'int' AND c.is_nullable = 0)
               OR (c.name = N'AlertType' AND t.name = N'varchar' AND c.max_length >= 20 AND c.is_nullable = 0)
               OR (c.name = N'DeliveryStatus' AND t.name = N'varchar' AND c.max_length >= 20 AND c.is_nullable = 0)
-              OR (c.name = N'ReportName' AND t.name = N'nvarchar' AND c.max_length >= 1024)
+              OR (c.name = N'ReportName' AND t.name = N'nvarchar' AND c.max_length >= 1024 AND c.is_nullable = 1)
               OR (c.name = N'CreatedDate' AND t.name = N'datetime2' AND c.is_nullable = 0)
               OR (c.name = N'LastAttemptDate' AND t.name = N'datetime2' AND c.is_nullable = 0)
-              OR (c.name = N'SentDate' AND t.name = N'datetime2')
-              OR (c.name = N'LastError' AND t.name = N'nvarchar' AND c.max_length >= 8000)
-              OR (c.name = N'Id' AND t.name = N'int' AND c.is_identity = 1)
+              OR (c.name = N'SentDate' AND t.name = N'datetime2' AND c.is_nullable = 1)
+              OR (c.name = N'LastError' AND t.name = N'nvarchar' AND c.max_length >= 8000 AND c.is_nullable = 1)
+              OR (c.name = N'Id' AND t.name = N'int' AND c.is_identity = 1 AND c.is_nullable = 0)
           )
     )
     AND EXISTS (
@@ -405,6 +416,10 @@ SELECT
           AND name = N'CK_AlertHistory_DeliveryStatus'
           AND is_disabled = 0
           AND is_not_trusted = 0
+          AND definition LIKE N'%Pending%'
+          AND definition LIKE N'%Sent%'
+          AND definition LIKE N'%Failed%'
+          AND definition LIKE N'%Unknown%'
     ) THEN 1 ELSE 0 END AS SchemaReady,
     CASE WHEN EXISTS (
         SELECT 1
@@ -412,6 +427,8 @@ SELECT
         WHERE i.object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
           AND i.name = N'UX_AlertHistory_AlertKey'
           AND i.is_unique = 1
+          AND i.is_disabled = 0
+          AND i.has_filter = 0
           AND 3 = (
               SELECT COUNT(*) FROM sys.index_columns AS ic
               WHERE ic.object_id = i.object_id
