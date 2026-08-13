@@ -768,7 +768,8 @@ function Invoke-SelfTests {
     Assert-Equal "Webhook отсутствует в исходном коде" $false ([regex]::IsMatch($scriptText, "https://[^`"']+/hooks/"))
     Assert-Equal "Безопасный режим запуска по умолчанию" $true ([regex]::IsMatch($scriptText, '\[string\]\$Mode = "Diagnose"'))
     Assert-Equal "Лимит не применяется до дедупликации" $false ([regex]::IsMatch($scriptText, 'SELECT\s+\$topClause'))
-    Assert-Equal "Неопределённая доставка не повторяется автоматически" $false ([regex]::IsMatch($scriptText, 'RetryFailed'))
+    $unsafeRetryParameter = "Retry" + "Failed"
+    Assert-Equal "Неопределённая доставка не повторяется автоматически" $false ([regex]::IsMatch($scriptText, $unsafeRetryParameter))
     Assert-Equal "Неопределённая доставка имеет отдельный статус" $true ([regex]::IsMatch($scriptText, "DeliveryStatus.+Unknown", [System.Text.RegularExpressions.RegexOptions]::Singleline))
 
     if ($failures.Count -gt 0) {
