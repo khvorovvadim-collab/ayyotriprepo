@@ -58,7 +58,9 @@ function Write-Log {
             Write-Warning "Не удалось записать файловый лог '$LogFile': $($_.Exception.Message)"
         }
     }
-    Write-Host $entry
+    # Write-Output попадает в журнал шага SQL Server Agent, в отличие от
+    # Write-Host, который PowerShell subsystem может не сохранять.
+    Write-Output $entry
 }
 
 function Get-RowValue {
