@@ -276,29 +276,33 @@ BEGIN
     IF COL_LENGTH(N'pbix.AlertHistory', N'LastError') IS NULL
         ALTER TABLE [pbix].[AlertHistory] ADD [LastError] NVARCHAR(4000) NULL;
 
-    UPDATE [pbix].[AlertHistory]
-    SET [DeliveryStatus] = 'Unknown'
-    WHERE [DeliveryStatus] IS NULL
-       OR [DeliveryStatus] NOT IN ('Pending', 'Sent', 'Failed', 'Unknown', 'Suppressed');
+    -- Новые колонки должны компилироваться только после выполнения ALTER ADD.
+    -- Динамический batch предотвращает Invalid column name при первой миграции.
+    EXEC sys.sp_executesql N'
+        UPDATE [pbix].[AlertHistory]
+        SET [DeliveryStatus] = ''Unknown''
+        WHERE [DeliveryStatus] IS NULL
+           OR [DeliveryStatus] NOT IN (''Pending'', ''Sent'', ''Failed'', ''Unknown'', ''Suppressed'');
 
-    UPDATE [pbix].[AlertHistory]
-    SET [CreatedDate] = COALESCE([SentDate], SYSUTCDATETIME())
-    WHERE [CreatedDate] IS NULL;
+        UPDATE [pbix].[AlertHistory]
+        SET [CreatedDate] = COALESCE([SentDate], SYSUTCDATETIME())
+        WHERE [CreatedDate] IS NULL;
 
-    UPDATE [pbix].[AlertHistory]
-    SET [LastAttemptDate] = [CreatedDate]
-    WHERE [LastAttemptDate] IS NULL;
+        UPDATE [pbix].[AlertHistory]
+        SET [LastAttemptDate] = [CreatedDate]
+        WHERE [LastAttemptDate] IS NULL;
 
-    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [DeliveryStatus] VARCHAR(20) NOT NULL;
-    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [ReportName] NVARCHAR(512) NULL;
-    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [CreatedDate] DATETIME2(0) NOT NULL;
-    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [LastAttemptDate] DATETIME2(0) NOT NULL;
-    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [SentDate] DATETIME2(0) NULL;
-    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [LastError] NVARCHAR(4000) NULL;
+        ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [DeliveryStatus] VARCHAR(20) NOT NULL;
+        ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [ReportName] NVARCHAR(512) NULL;
+        ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [CreatedDate] DATETIME2(0) NOT NULL;
+        ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [LastAttemptDate] DATETIME2(0) NOT NULL;
+        ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [SentDate] DATETIME2(0) NULL;
+        ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [LastError] NVARCHAR(4000) NULL;
 
-    ALTER TABLE [pbix].[AlertHistory] WITH CHECK
-        ADD CONSTRAINT [CK_AlertHistory_DeliveryStatus]
-        CHECK ([DeliveryStatus] IN ('Pending', 'Sent', 'Failed', 'Unknown', 'Suppressed'));
+        ALTER TABLE [pbix].[AlertHistory] WITH CHECK
+            ADD CONSTRAINT [CK_AlertHistory_DeliveryStatus]
+            CHECK ([DeliveryStatus] IN (''Pending'', ''Sent'', ''Failed'', ''Unknown'', ''Suppressed''));
+    ';
 END;
 
 IF EXISTS (
@@ -868,6 +872,8 @@ function Invoke-SelfTests {
 
     Assert-Equal "Режим Baseline доступен" $true ([regex]::IsMatch($scriptText, 'ValidateSet\([^\)]*"Baseline"'))
     Assert-Equal "Baseline имеет отдельный статус" $true ([regex]::IsMatch($scriptText, "DeliveryStatus.+Suppressed", [System.Text.RegularExpressions.RegexOptions]::Singleline))
+    Assert-Equal "Миграция новых колонок компилируется отдельным batch" $true ([regex]::IsMatch($scriptText, "EXEC sys\.sp_executesql N'.+UPDATE \[pbix\]\.\[AlertHistory\].+\[DeliveryStatus\]", [System.Text.RegularExpressions.RegexOptions]::Singleline))
+    Assert-Equal "Критическая ошибка повторно выбрасывается для SQL Agent" $true ([regex]::IsMatch($scriptText, 'catch\s*\{[^\}]*Критическая ошибка[^\}]*throw', [System.Text.RegularExpressions.RegexOptions]::Singleline))
 
     if ($failures.Count -gt 0) {
         foreach ($failure in $failures) {
@@ -875,7 +881,7 @@ function Invoke-SelfTests {
         }
         throw "Провалено тестов: $($failures.Count)."
     }
-    Write-Log "Все локальные тесты пройдены: 14."
+    Write-Log "Все локальные тесты пройдены: 16."
 }
 
 function Invoke-Diagnostics {
@@ -1100,7 +1106,7 @@ try {
 }
 catch {
     Write-Log "Критическая ошибка: $($_.Exception.Message)" "ERROR"
-    exit 1
+    throw
 }
 finally {
     if ($null -ne $connection) {
