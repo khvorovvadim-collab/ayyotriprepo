@@ -165,7 +165,9 @@ ORDER BY [StartTime], [SubscriptionID];
     $table = [System.Data.DataTable]::new()
     try {
         [void]$adapter.Fill($table)
-        return $table
+        # DataTable реализует IEnumerable. Без запятой PowerShell разворачивает
+        # его в DataRow, и вызывающий код теряет свойство .Rows.
+        return ,$table
     }
     finally {
         $adapter.Dispose()
@@ -793,13 +795,19 @@ function Invoke-SelfTests {
     Assert-Equal "Неопределённая доставка не повторяется автоматически" $false ([regex]::IsMatch($scriptText, $unsafeRetryParameter))
     Assert-Equal "Неопределённая доставка имеет отдельный статус" $true ([regex]::IsMatch($scriptText, "DeliveryStatus.+Unknown", [System.Text.RegularExpressions.RegexOptions]::Singleline))
 
+    $testTable = [System.Data.DataTable]::new()
+    [void]$testTable.Columns.Add("Id", [int])
+    [void]$testTable.Rows.Add(1)
+    $preservedTable = & { return ,$testTable }
+    Assert-Equal "DataTable не разворачивается в DataRow" "System.Data.DataTable" $preservedTable.GetType().FullName
+
     if ($failures.Count -gt 0) {
         foreach ($failure in $failures) {
             Write-Log "FAIL: $failure" "ERROR"
         }
         throw "Провалено тестов: $($failures.Count)."
     }
-    Write-Log "Все локальные тесты пройдены: 11."
+    Write-Log "Все локальные тесты пройдены: 12."
 }
 
 function Invoke-Diagnostics {
