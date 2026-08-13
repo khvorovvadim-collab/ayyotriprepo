@@ -39,6 +39,39 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 формирования алертов, совместное событие Error+Timeout, границу таймаута,
 UTF-8, отсутствие webhook в коде и безопасный режим по умолчанию.
 
+#### Запуск теста через SQL Server Agent
+
+Сначала скопируйте скрипт на сервер, например:
+
+```text
+F:\Project\PowerBI_ALERT_Mattermost.ps1
+```
+
+Учётная запись SQL Server Agent (`ALKOR\sqlagent`) должна иметь права чтения и
+выполнения файла. В шаге задания типа **PowerShell** используйте абсолютный
+путь:
+
+```powershell
+$scriptPath = 'F:\Project\PowerBI_ALERT_Mattermost.ps1'
+
+if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+    throw "Скрипт не найден: $scriptPath"
+}
+
+& $scriptPath -Mode Test -LogFile ''
+```
+
+Не запускайте `powershell.exe` внутри шага типа PowerShell и не используйте
+относительный путь `.\PowerBI_ALERT_Mattermost.ps1`: рабочий каталог SQL Agent
+может отличаться от каталога скрипта. Явная проверка `Test-Path` гарантирует,
+что при отсутствии файла шаг завершится ошибкой, а не ложным успехом.
+
+Успешный тест заканчивается сообщением:
+
+```text
+Все локальные тесты пройдены: 11.
+```
+
 ### 2. Диагностика без изменений в SQL и без HTTP
 
 ```powershell
