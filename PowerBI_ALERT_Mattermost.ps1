@@ -30,9 +30,7 @@ param(
     [int]$Limit = 0,
 
     [ValidateRange(1, 86400)]
-    [int]$TimeoutThresholdSeconds = 10800,
-
-    [switch]$RetryFailed
+    [int]$TimeoutThresholdSeconds = 10800
 )
 
 Set-StrictMode -Version Latest
@@ -119,9 +117,8 @@ function Add-SqlParameter {
 function Get-SourceRows {
     param([Parameter(Mandatory = $true)][System.Data.SqlClient.SqlConnection]$Connection)
 
-    $topClause = if ($Limit -gt 0) { "TOP ($Limit)" } else { "" }
     $query = @"
-SELECT $topClause
+SELECT
     [ReportName],
     [ReportPath],
     [SubscriptionID],
@@ -187,8 +184,8 @@ BEGIN
     CREATE TABLE [pbix].[AlertHistory] (
         [Id] INT IDENTITY(1,1) NOT NULL CONSTRAINT [PK_AlertHistory] PRIMARY KEY,
         [SubscriptionID] UNIQUEIDENTIFIER NOT NULL,
-        [StartTime] DATETIME NOT NULL,
-        [EndTime] DATETIME NOT NULL,
+        [StartTime] DATETIME2(3) NOT NULL,
+        [EndTime] DATETIME2(3) NOT NULL,
         [DurationSeconds] INT NOT NULL,
         [AlertType] VARCHAR(20) NOT NULL,
         [DeliveryStatus] VARCHAR(20) NOT NULL
@@ -201,11 +198,53 @@ BEGIN
         [SentDate] DATETIME2(0) NULL,
         [LastError] NVARCHAR(4000) NULL,
         CONSTRAINT [CK_AlertHistory_DeliveryStatus]
-            CHECK ([DeliveryStatus] IN ('Pending', 'Sent', 'Failed'))
+            CHECK ([DeliveryStatus] IN ('Pending', 'Sent', 'Failed', 'Unknown'))
     );
 END
 ELSE
 BEGIN
+    IF EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
+          AND name = N'UX_AlertHistory_AlertKey'
+    )
+        DROP INDEX [UX_AlertHistory_AlertKey] ON [pbix].[AlertHistory];
+
+    IF EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
+          AND name = N'IX_AlertHistory_SubscriptionID_StartTime_AlertType'
+    )
+        DROP INDEX [IX_AlertHistory_SubscriptionID_StartTime_AlertType] ON [pbix].[AlertHistory];
+
+    IF EXISTS (
+        SELECT 1 FROM sys.check_constraints
+        WHERE parent_object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
+          AND name = N'CK_AlertHistory_DeliveryStatus'
+    )
+        ALTER TABLE [pbix].[AlertHistory] DROP CONSTRAINT [CK_AlertHistory_DeliveryStatus];
+
+    IF COL_LENGTH(N'pbix.AlertHistory', N'Id') IS NULL
+        THROW 51006, 'В AlertHistory отсутствует обязательная identity-колонка Id.', 1;
+    IF COLUMNPROPERTY(OBJECT_ID(N'[pbix].[AlertHistory]'), N'Id', 'IsIdentity') <> 1
+        THROW 51007, 'Колонка AlertHistory.Id должна быть IDENTITY.', 1;
+    IF COL_LENGTH(N'pbix.AlertHistory', N'SubscriptionID') IS NULL
+        THROW 51001, 'В AlertHistory отсутствует обязательная колонка SubscriptionID.', 1;
+    IF COL_LENGTH(N'pbix.AlertHistory', N'StartTime') IS NULL
+        THROW 51002, 'В AlertHistory отсутствует обязательная колонка StartTime.', 1;
+    IF COL_LENGTH(N'pbix.AlertHistory', N'EndTime') IS NULL
+        THROW 51003, 'В AlertHistory отсутствует обязательная колонка EndTime.', 1;
+    IF COL_LENGTH(N'pbix.AlertHistory', N'DurationSeconds') IS NULL
+        THROW 51004, 'В AlertHistory отсутствует обязательная колонка DurationSeconds.', 1;
+    IF COL_LENGTH(N'pbix.AlertHistory', N'AlertType') IS NULL
+        THROW 51005, 'В AlertHistory отсутствует обязательная колонка AlertType.', 1;
+
+    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [SubscriptionID] UNIQUEIDENTIFIER NOT NULL;
+    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [StartTime] DATETIME2(3) NOT NULL;
+    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [EndTime] DATETIME2(3) NOT NULL;
+    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [DurationSeconds] INT NOT NULL;
+    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [AlertType] VARCHAR(20) NOT NULL;
+
     IF COL_LENGTH(N'pbix.AlertHistory', N'DeliveryStatus') IS NULL
         ALTER TABLE [pbix].[AlertHistory] ADD [DeliveryStatus] VARCHAR(20) NOT NULL
             CONSTRAINT [DF_AlertHistory_DeliveryStatus] DEFAULT ('Sent') WITH VALUES;
@@ -217,8 +256,34 @@ BEGIN
     IF COL_LENGTH(N'pbix.AlertHistory', N'LastAttemptDate') IS NULL
         ALTER TABLE [pbix].[AlertHistory] ADD [LastAttemptDate] DATETIME2(0) NOT NULL
             CONSTRAINT [DF_AlertHistory_LastAttemptDate] DEFAULT (SYSUTCDATETIME()) WITH VALUES;
+    IF COL_LENGTH(N'pbix.AlertHistory', N'SentDate') IS NULL
+        ALTER TABLE [pbix].[AlertHistory] ADD [SentDate] DATETIME2(0) NULL;
     IF COL_LENGTH(N'pbix.AlertHistory', N'LastError') IS NULL
         ALTER TABLE [pbix].[AlertHistory] ADD [LastError] NVARCHAR(4000) NULL;
+
+    UPDATE [pbix].[AlertHistory]
+    SET [DeliveryStatus] = 'Unknown'
+    WHERE [DeliveryStatus] IS NULL
+       OR [DeliveryStatus] NOT IN ('Pending', 'Sent', 'Failed', 'Unknown');
+
+    UPDATE [pbix].[AlertHistory]
+    SET [CreatedDate] = COALESCE([SentDate], SYSUTCDATETIME())
+    WHERE [CreatedDate] IS NULL;
+
+    UPDATE [pbix].[AlertHistory]
+    SET [LastAttemptDate] = [CreatedDate]
+    WHERE [LastAttemptDate] IS NULL;
+
+    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [DeliveryStatus] VARCHAR(20) NOT NULL;
+    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [ReportName] NVARCHAR(512) NULL;
+    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [CreatedDate] DATETIME2(0) NOT NULL;
+    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [LastAttemptDate] DATETIME2(0) NOT NULL;
+    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [SentDate] DATETIME2(0) NULL;
+    ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [LastError] NVARCHAR(4000) NULL;
+
+    ALTER TABLE [pbix].[AlertHistory] WITH CHECK
+        ADD CONSTRAINT [CK_AlertHistory_DeliveryStatus]
+        CHECK ([DeliveryStatus] IN ('Pending', 'Sent', 'Failed', 'Unknown'));
 END;
 
 IF EXISTS (
@@ -229,9 +294,59 @@ IF EXISTS (
 )
     THROW 51000, 'В AlertHistory есть дубли. Удалите их после проверки перед созданием уникального индекса.', 1;
 
-IF NOT EXISTS (
+IF EXISTS (
     SELECT 1
-    FROM sys.indexes
+    FROM sys.indexes AS i
+    WHERE i.object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
+      AND i.name = N'UX_AlertHistory_AlertKey'
+      AND (
+          i.is_unique = 0
+          OR 3 <> (
+              SELECT COUNT(*)
+              FROM sys.index_columns AS ic
+              WHERE ic.object_id = i.object_id
+                AND ic.index_id = i.index_id
+                AND ic.key_ordinal > 0
+          )
+          OR NOT EXISTS (
+              SELECT 1
+              FROM sys.index_columns AS ic
+              JOIN sys.columns AS c
+                ON c.object_id = ic.object_id
+               AND c.column_id = ic.column_id
+              WHERE ic.object_id = i.object_id
+                AND ic.index_id = i.index_id
+                AND ic.key_ordinal = 1
+                AND c.name = N'SubscriptionID'
+          )
+          OR NOT EXISTS (
+              SELECT 1
+              FROM sys.index_columns AS ic
+              JOIN sys.columns AS c
+                ON c.object_id = ic.object_id
+               AND c.column_id = ic.column_id
+              WHERE ic.object_id = i.object_id
+                AND ic.index_id = i.index_id
+                AND ic.key_ordinal = 2
+                AND c.name = N'StartTime'
+          )
+          OR NOT EXISTS (
+              SELECT 1
+              FROM sys.index_columns AS ic
+              JOIN sys.columns AS c
+                ON c.object_id = ic.object_id
+               AND c.column_id = ic.column_id
+              WHERE ic.object_id = i.object_id
+                AND ic.index_id = i.index_id
+                AND ic.key_ordinal = 3
+                AND c.name = N'AlertType'
+          )
+      )
+)
+    DROP INDEX [UX_AlertHistory_AlertKey] ON [pbix].[AlertHistory];
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
     WHERE object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
       AND name = N'UX_AlertHistory_AlertKey'
 )
@@ -257,17 +372,73 @@ function Test-HistoryTable {
     $query = @"
 SELECT
     CASE WHEN OBJECT_ID(N'[pbix].[AlertHistory]', N'U') IS NULL THEN 0 ELSE 1 END AS TableExists,
-    (
+    CASE WHEN 3 = (
         SELECT COUNT(*)
         FROM sys.columns
         WHERE object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
-          AND name IN (N'DeliveryStatus', N'ReportName', N'CreatedDate', N'LastAttemptDate', N'LastError')
-    ) AS NewColumnCount,
+          AND name IN (N'SubscriptionID', N'StartTime', N'AlertType')
+    ) THEN 1 ELSE 0 END AS HasKeyColumns,
+    CASE WHEN 12 = (
+        SELECT COUNT(*)
+        FROM sys.columns AS c
+        JOIN sys.types AS t ON t.user_type_id = c.user_type_id
+        WHERE c.object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
+          AND (
+              (c.name = N'SubscriptionID' AND t.name = N'uniqueidentifier' AND c.is_nullable = 0)
+              OR (c.name = N'StartTime' AND t.name = N'datetime2' AND c.scale = 3 AND c.is_nullable = 0)
+              OR (c.name = N'EndTime' AND t.name = N'datetime2' AND c.scale = 3 AND c.is_nullable = 0)
+              OR (c.name = N'DurationSeconds' AND t.name = N'int' AND c.is_nullable = 0)
+              OR (c.name = N'AlertType' AND t.name = N'varchar' AND c.max_length >= 20 AND c.is_nullable = 0)
+              OR (c.name = N'DeliveryStatus' AND t.name = N'varchar' AND c.max_length >= 20 AND c.is_nullable = 0)
+              OR (c.name = N'ReportName' AND t.name = N'nvarchar' AND c.max_length >= 1024)
+              OR (c.name = N'CreatedDate' AND t.name = N'datetime2' AND c.is_nullable = 0)
+              OR (c.name = N'LastAttemptDate' AND t.name = N'datetime2' AND c.is_nullable = 0)
+              OR (c.name = N'SentDate' AND t.name = N'datetime2')
+              OR (c.name = N'LastError' AND t.name = N'nvarchar' AND c.max_length >= 8000)
+              OR (c.name = N'Id' AND t.name = N'int' AND c.is_identity = 1)
+          )
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM sys.check_constraints
+        WHERE parent_object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
+          AND name = N'CK_AlertHistory_DeliveryStatus'
+          AND is_disabled = 0
+          AND is_not_trusted = 0
+    ) THEN 1 ELSE 0 END AS SchemaReady,
     CASE WHEN EXISTS (
-        SELECT 1 FROM sys.indexes
-        WHERE object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
-          AND name = N'UX_AlertHistory_AlertKey'
-          AND is_unique = 1
+        SELECT 1
+        FROM sys.indexes AS i
+        WHERE i.object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
+          AND i.name = N'UX_AlertHistory_AlertKey'
+          AND i.is_unique = 1
+          AND 3 = (
+              SELECT COUNT(*) FROM sys.index_columns AS ic
+              WHERE ic.object_id = i.object_id
+                AND ic.index_id = i.index_id
+                AND ic.key_ordinal > 0
+          )
+          AND N'SubscriptionID' = (
+              SELECT c.name
+              FROM sys.index_columns AS ic
+              JOIN sys.columns AS c
+                ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+              WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal = 1
+          )
+          AND N'StartTime' = (
+              SELECT c.name
+              FROM sys.index_columns AS ic
+              JOIN sys.columns AS c
+                ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+              WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal = 2
+          )
+          AND N'AlertType' = (
+              SELECT c.name
+              FROM sys.index_columns AS ic
+              JOIN sys.columns AS c
+                ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+              WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal = 3
+          )
     ) THEN 1 ELSE 0 END AS UniqueIndexExists;
 "@
     $command = [System.Data.SqlClient.SqlCommand]::new($query, $Connection)
@@ -276,8 +447,9 @@ SELECT
         try {
             [void]$reader.Read()
             return [pscustomobject]@{
-                TableExists      = ([int]$reader["TableExists"] -eq 1)
-                NewColumnCount   = [int]$reader["NewColumnCount"]
+                TableExists       = ([int]$reader["TableExists"] -eq 1)
+                HasKeyColumns     = ([int]$reader["HasKeyColumns"] -eq 1)
+                SchemaReady       = ([int]$reader["SchemaReady"] -eq 1)
                 UniqueIndexExists = ([int]$reader["UniqueIndexExists"] -eq 1)
             }
         }
@@ -300,7 +472,8 @@ BEGIN
         CAST(0 AS BIGINT) AS TotalRows,
         CAST(0 AS BIGINT) AS DuplicateKeys,
         CAST(0 AS BIGINT) AS PendingRows,
-        CAST(0 AS BIGINT) AS FailedRows;
+        CAST(0 AS BIGINT) AS FailedRows,
+        CAST(0 AS BIGINT) AS UnknownRows;
 END
 ELSE
 BEGIN
@@ -325,6 +498,10 @@ BEGIN
             ' + CASE WHEN @HasStatus = 1
                 THEN N'SUM(CASE WHEN [DeliveryStatus] = ''Failed'' THEN 1 ELSE 0 END)'
                 ELSE N'CAST(0 AS BIGINT)' END + N' AS FailedRows
+            ,
+            ' + CASE WHEN @HasStatus = 1
+                THEN N'SUM(CASE WHEN [DeliveryStatus] = ''Unknown'' THEN 1 ELSE 0 END)'
+                ELSE N'CAST(0 AS BIGINT)' END + N' AS UnknownRows
         FROM [pbix].[AlertHistory];';
     EXEC sys.sp_executesql @Sql;
 END;
@@ -340,6 +517,7 @@ END;
                 DuplicateKeys = [long]$reader["DuplicateKeys"]
                 PendingRows   = if ($reader.IsDBNull(2)) { 0L } else { [long]$reader["PendingRows"] }
                 FailedRows    = if ($reader.IsDBNull(3)) { 0L } else { [long]$reader["FailedRows"] }
+                UnknownRows   = if ($reader.IsDBNull(4)) { 0L } else { [long]$reader["UnknownRows"] }
             }
         }
         finally {
@@ -383,7 +561,7 @@ function Request-Delivery {
         [Parameter(Mandatory = $true)][datetime]$EndTime,
         [Parameter(Mandatory = $true)][int]$DurationSeconds,
         [Parameter(Mandatory = $true)][string]$AlertType,
-        [Parameter(Mandatory = $true)][string]$ReportName
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ReportName
     )
 
     $query = @"
@@ -409,20 +587,6 @@ BEGIN
     );
     SELECT CAST(1 AS int);
 END
-ELSE IF @ExistingStatus = 'Failed' AND @RetryFailed = 1
-BEGIN
-    UPDATE [pbix].[AlertHistory]
-    SET [DeliveryStatus] = 'Pending',
-        [EndTime] = @EndTime,
-        [DurationSeconds] = @DurationSeconds,
-        [ReportName] = @ReportName,
-        [LastAttemptDate] = SYSUTCDATETIME(),
-        [LastError] = NULL
-    WHERE [SubscriptionID] = @SubscriptionID
-      AND [StartTime] = @StartTime
-      AND [AlertType] = @AlertType;
-    SELECT CAST(1 AS int);
-END
 ELSE
     SELECT CAST(0 AS int);
 
@@ -432,12 +596,11 @@ COMMIT TRANSACTION;
     $command = [System.Data.SqlClient.SqlCommand]::new($query, $Connection)
     try {
         [void](Add-SqlParameter $command "@SubscriptionID" ([System.Data.SqlDbType]::UniqueIdentifier) $SubscriptionID)
-        [void](Add-SqlParameter $command "@StartTime" ([System.Data.SqlDbType]::DateTime) $StartTime)
-        [void](Add-SqlParameter $command "@EndTime" ([System.Data.SqlDbType]::DateTime) $EndTime)
+        [void](Add-SqlParameter $command "@StartTime" ([System.Data.SqlDbType]::DateTime2) $StartTime)
+        [void](Add-SqlParameter $command "@EndTime" ([System.Data.SqlDbType]::DateTime2) $EndTime)
         [void](Add-SqlParameter $command "@DurationSeconds" ([System.Data.SqlDbType]::Int) $DurationSeconds)
         [void](Add-SqlParameter $command "@AlertType" ([System.Data.SqlDbType]::VarChar) $AlertType 20)
         [void](Add-SqlParameter $command "@ReportName" ([System.Data.SqlDbType]::NVarChar) $ReportName 512)
-        [void](Add-SqlParameter $command "@RetryFailed" ([System.Data.SqlDbType]::Bit) ([bool]$RetryFailed))
         return ([int]$command.ExecuteScalar() -eq 1)
     }
     finally {
@@ -470,10 +633,10 @@ SELECT @@ROWCOUNT;
 "@
     $command = [System.Data.SqlClient.SqlCommand]::new($query, $Connection)
     try {
-        [void](Add-SqlParameter $command "@DeliveryStatus" ([System.Data.SqlDbType]::VarChar) $(if ($Succeeded) { "Sent" } else { "Failed" }) 20)
+        [void](Add-SqlParameter $command "@DeliveryStatus" ([System.Data.SqlDbType]::VarChar) $(if ($Succeeded) { "Sent" } else { "Unknown" }) 20)
         [void](Add-SqlParameter $command "@LastError" ([System.Data.SqlDbType]::NVarChar) $(if ($ErrorMessage) { $ErrorMessage } else { [DBNull]::Value }) 4000)
         [void](Add-SqlParameter $command "@SubscriptionID" ([System.Data.SqlDbType]::UniqueIdentifier) $SubscriptionID)
-        [void](Add-SqlParameter $command "@StartTime" ([System.Data.SqlDbType]::DateTime) $StartTime)
+        [void](Add-SqlParameter $command "@StartTime" ([System.Data.SqlDbType]::DateTime2) $StartTime)
         [void](Add-SqlParameter $command "@AlertType" ([System.Data.SqlDbType]::VarChar) $AlertType 20)
         if ([int]$command.ExecuteScalar() -ne 1) {
             throw "Не удалось изменить статус Pending для $SubscriptionID/$StartTime/$AlertType."
@@ -487,8 +650,8 @@ SELECT @@ROWCOUNT;
 function Format-AlertText {
     param(
         [Parameter(Mandatory = $true)][string]$AlertType,
-        [Parameter(Mandatory = $true)][string]$ReportName,
-        [Parameter(Mandatory = $true)][string]$ReportPath,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ReportName,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ReportPath,
         [Parameter(Mandatory = $true)][guid]$SubscriptionID,
         [Parameter(Mandatory = $true)][datetime]$StartTime,
         [Parameter(Mandatory = $true)][datetime]$EndTime,
@@ -604,6 +767,9 @@ function Invoke-SelfTests {
     $scriptText = [System.IO.File]::ReadAllText($PSCommandPath)
     Assert-Equal "Webhook отсутствует в исходном коде" $false ([regex]::IsMatch($scriptText, "https://[^`"']+/hooks/"))
     Assert-Equal "Безопасный режим запуска по умолчанию" $true ([regex]::IsMatch($scriptText, '\[string\]\$Mode = "Diagnose"'))
+    Assert-Equal "Лимит не применяется до дедупликации" $false ([regex]::IsMatch($scriptText, 'SELECT\s+\$topClause'))
+    Assert-Equal "Неопределённая доставка не повторяется автоматически" $false ([regex]::IsMatch($scriptText, 'RetryFailed'))
+    Assert-Equal "Неопределённая доставка имеет отдельный статус" $true ([regex]::IsMatch($scriptText, "DeliveryStatus.+Unknown", [System.Text.RegularExpressions.RegexOptions]::Singleline))
 
     if ($failures.Count -gt 0) {
         foreach ($failure in $failures) {
@@ -611,14 +777,23 @@ function Invoke-SelfTests {
         }
         throw "Провалено тестов: $($failures.Count)."
     }
-    Write-Log "Все локальные тесты пройдены: 8."
+    Write-Log "Все локальные тесты пройдены: 11."
 }
 
 function Invoke-Diagnostics {
     param([Parameter(Mandatory = $true)][System.Data.SqlClient.SqlConnection]$Connection)
 
     $schema = Test-HistoryTable $Connection
-    $history = Get-HistoryDiagnostics $Connection
+    $history = [pscustomobject]@{
+        TotalRows     = 0L
+        DuplicateKeys = 0L
+        PendingRows   = 0L
+        FailedRows    = 0L
+        UnknownRows   = 0L
+    }
+    if ($schema.TableExists -and $schema.HasKeyColumns) {
+        $history = Get-HistoryDiagnostics $Connection
+    }
     $rows = Get-SourceRows $Connection
     $candidateCount = 0
     $invalidCount = 0
@@ -634,12 +809,12 @@ function Invoke-Diagnostics {
         }
     }
 
-    Write-Log "Диагностика завершена без изменений в БД и без HTTP-запросов."
+    Write-Log "Диагностика завершена без изменений в SQL и без HTTP-запросов. Файловый диагностический лог обновлён."
     Write-Log "Источник: строк=$($rows.Rows.Count), потенциальных алертов=$candidateCount, некорректных строк=$invalidCount."
-    Write-Log "AlertHistory: существует=$($schema.TableExists), новых колонок=$($schema.NewColumnCount)/5, уникальный индекс=$($schema.UniqueIndexExists)."
-    Write-Log "AlertHistory: строк=$($history.TotalRows), ключей-дублей=$($history.DuplicateKeys), Pending=$($history.PendingRows), Failed=$($history.FailedRows)."
+    Write-Log "AlertHistory: существует=$($schema.TableExists), схема готова=$($schema.SchemaReady), уникальный индекс корректен=$($schema.UniqueIndexExists)."
+    Write-Log "AlertHistory: строк=$($history.TotalRows), ключей-дублей=$($history.DuplicateKeys), Pending=$($history.PendingRows), Failed=$($history.FailedRows), Unknown=$($history.UnknownRows)."
 
-    if (-not $schema.TableExists -or $schema.NewColumnCount -ne 5 -or -not $schema.UniqueIndexExists) {
+    if (-not $schema.SchemaReady -or -not $schema.UniqueIndexExists) {
         Write-Log "Перед Send выполните режим Initialize." "WARN"
     }
     if ($history.DuplicateKeys -gt 0) {
@@ -655,7 +830,7 @@ function Invoke-Delivery {
     }
 
     $schema = Test-HistoryTable $Connection
-    if (-not $schema.TableExists -or $schema.NewColumnCount -ne 5 -or -not $schema.UniqueIndexExists) {
+    if (-not $schema.SchemaReady -or -not $schema.UniqueIndexExists) {
         throw "Таблица журнала не инициализирована. Сначала выполните -Mode Initialize."
     }
 
@@ -664,8 +839,9 @@ function Invoke-Delivery {
     $sentCount = 0
     $skippedCount = 0
     $failedCount = 0
+    $claimedCount = 0
 
-    foreach ($row in $rows.Rows) {
+    :SourceRow foreach ($row in $rows.Rows) {
         try {
             $candidate = ConvertTo-AlertCandidate $row
         }
@@ -677,6 +853,26 @@ function Invoke-Delivery {
 
         $alertTypes = Get-AlertTypes $candidate.Status $candidate.DurationSeconds $TimeoutThresholdSeconds
         foreach ($alertType in $alertTypes) {
+            try {
+                $text = Format-AlertText `
+                    -AlertType $alertType `
+                    -ReportName $candidate.ReportName `
+                    -ReportPath $candidate.ReportPath `
+                    -SubscriptionID $candidate.SubscriptionID `
+                    -StartTime $candidate.StartTime `
+                    -EndTime $candidate.EndTime `
+                    -DurationSeconds $candidate.DurationSeconds `
+                    -DurationMinutes $candidate.DurationMinutes `
+                    -Status $candidate.Status `
+                    -Message $candidate.Message `
+                    -Details $candidate.Details
+            }
+            catch {
+                $failedCount++
+                Write-Log "Не удалось сформировать $alertType для '$($candidate.ReportName)': $($_.Exception.Message)" "ERROR"
+                continue
+            }
+
             $claimed = Request-Delivery `
                 -Connection $Connection `
                 -SubscriptionID $candidate.SubscriptionID `
@@ -692,18 +888,7 @@ function Invoke-Delivery {
                 continue
             }
 
-            $text = Format-AlertText `
-                -AlertType $alertType `
-                -ReportName $candidate.ReportName `
-                -ReportPath $candidate.ReportPath `
-                -SubscriptionID $candidate.SubscriptionID `
-                -StartTime $candidate.StartTime `
-                -EndTime $candidate.EndTime `
-                -DurationSeconds $candidate.DurationSeconds `
-                -DurationMinutes $candidate.DurationMinutes `
-                -Status $candidate.Status `
-                -Message $candidate.Message `
-                -Details $candidate.Details
+            $claimedCount++
 
             try {
                 $statusCode = Send-MattermostMessage $text
@@ -725,12 +910,16 @@ function Invoke-Delivery {
                 catch {
                     Write-Log "Не удалось записать ошибку доставки; запись остаётся Pending: $($_.Exception.Message)" "ERROR"
                 }
-                Write-Log "Алерт $alertType для '$($candidate.ReportName)' не отправлен: $sendError" "ERROR"
+                Write-Log "Результат отправки $alertType для '$($candidate.ReportName)' неопределён: $sendError. Автоматический повтор заблокирован." "ERROR"
+            }
+
+            if ($Limit -gt 0 -and $claimedCount -ge $Limit) {
+                break SourceRow
             }
         }
     }
 
-    Write-Log "Итоги: исходных строк=$($rows.Rows.Count), отправлено=$sentCount, пропущено=$skippedCount, ошибок=$failedCount."
+    Write-Log "Итоги: исходных строк=$($rows.Rows.Count), зарезервировано новых=$claimedCount, отправлено=$sentCount, пропущено=$skippedCount, ошибок=$failedCount."
 }
 
 $connection = $null
