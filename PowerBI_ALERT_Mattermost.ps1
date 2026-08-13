@@ -276,6 +276,23 @@ BEGIN
     IF COL_LENGTH(N'pbix.AlertHistory', N'LastError') IS NULL
         ALTER TABLE [pbix].[AlertHistory] ADD [LastError] NVARCHAR(4000) NULL;
 
+    -- ALTER COLUMN блокируется default-ограничениями, включая автоматически
+    -- именованный default старой SentDate. Удаляем их по метаданным и ниже
+    -- восстанавливаем только defaults, необходимые новой модели состояний.
+    DECLARE @DropDefaults nvarchar(max) = N'';
+    SELECT @DropDefaults = @DropDefaults
+        + N'ALTER TABLE [pbix].[AlertHistory] DROP CONSTRAINT '
+        + QUOTENAME(dc.name) + N';'
+    FROM sys.default_constraints AS dc
+    JOIN sys.columns AS c
+      ON c.object_id = dc.parent_object_id
+     AND c.column_id = dc.parent_column_id
+    WHERE dc.parent_object_id = OBJECT_ID(N'[pbix].[AlertHistory]')
+      AND c.name IN (N'DeliveryStatus', N'CreatedDate', N'LastAttemptDate', N'SentDate');
+
+    IF @DropDefaults <> N''
+        EXEC sys.sp_executesql @DropDefaults;
+
     -- Новые колонки должны компилироваться только после выполнения ALTER ADD.
     -- Динамический batch предотвращает Invalid column name при первой миграции.
     EXEC sys.sp_executesql N'
@@ -298,6 +315,16 @@ BEGIN
         ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [LastAttemptDate] DATETIME2(0) NOT NULL;
         ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [SentDate] DATETIME2(0) NULL;
         ALTER TABLE [pbix].[AlertHistory] ALTER COLUMN [LastError] NVARCHAR(4000) NULL;
+
+        ALTER TABLE [pbix].[AlertHistory]
+            ADD CONSTRAINT [DF_AlertHistory_DeliveryStatus]
+            DEFAULT (''Pending'') FOR [DeliveryStatus];
+        ALTER TABLE [pbix].[AlertHistory]
+            ADD CONSTRAINT [DF_AlertHistory_CreatedDate]
+            DEFAULT (SYSUTCDATETIME()) FOR [CreatedDate];
+        ALTER TABLE [pbix].[AlertHistory]
+            ADD CONSTRAINT [DF_AlertHistory_LastAttemptDate]
+            DEFAULT (SYSUTCDATETIME()) FOR [LastAttemptDate];
 
         ALTER TABLE [pbix].[AlertHistory] WITH CHECK
             ADD CONSTRAINT [CK_AlertHistory_DeliveryStatus]
@@ -873,6 +900,7 @@ function Invoke-SelfTests {
     Assert-Equal "Режим Baseline доступен" $true ([regex]::IsMatch($scriptText, 'ValidateSet\([^\)]*"Baseline"'))
     Assert-Equal "Baseline имеет отдельный статус" $true ([regex]::IsMatch($scriptText, "DeliveryStatus.+Suppressed", [System.Text.RegularExpressions.RegexOptions]::Singleline))
     Assert-Equal "Миграция новых колонок компилируется отдельным batch" $true ([regex]::IsMatch($scriptText, "EXEC sys\.sp_executesql N'.+UPDATE \[pbix\]\.\[AlertHistory\].+\[DeliveryStatus\]", [System.Text.RegularExpressions.RegexOptions]::Singleline))
+    Assert-Equal "Миграция удаляет зависимые default-ограничения" $true ([regex]::IsMatch($scriptText, 'FROM sys\.default_constraints AS dc'))
     Assert-Equal "Критическая ошибка повторно выбрасывается для SQL Agent" $true ([regex]::IsMatch($scriptText, 'catch\s*\{[^\}]*Критическая ошибка[^\}]*throw', [System.Text.RegularExpressions.RegexOptions]::Singleline))
 
     if ($failures.Count -gt 0) {
@@ -881,7 +909,7 @@ function Invoke-SelfTests {
         }
         throw "Провалено тестов: $($failures.Count)."
     }
-    Write-Log "Все локальные тесты пройдены: 16."
+    Write-Log "Все локальные тесты пройдены: 17."
 }
 
 function Invoke-Diagnostics {
