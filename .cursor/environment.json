@@ -1,0 +1,4 @@
+{
+  "name": "PowerBI Mattermost Alert (PowerShell)",
+  "install": "bash .cursor/install.sh"
+}
