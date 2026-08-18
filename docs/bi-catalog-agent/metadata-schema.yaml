@@ -1,0 +1,43 @@
+# Контракт каталога (черновик v0)
+# Генерируется CI, читается агентом. Не редактировать руками:
+# человеческие правки — только catalog/overrides/*.yaml
+
+version: 0
+
+catalog:
+  generated_at: "ISO-8601"
+  git_sha: "string"
+  scope:
+    pbirs_path_prefix: "/Product"
+    cubes: []
+
+objects:
+  - id: "kind:qualified"          # стабильный ключ
+    kind: measure                 # table|view|procedure|cube|measure|column|dataset|report|visual
+    name: "Revenue"
+    qualified_name: "[Sales].[Measures].[Revenue]"
+    owners: []
+    source_files: []
+    depends_on: []                # id других объектов
+    used_by: []
+    grain: null
+    expression: null
+    expression_kind: null         # sql|dax|mdx|m
+    description:
+      status: missing             # human|generated|missing
+      text: null
+      needs_review: true
+    tags: []
+
+runtime:                          # отдельный файл runtime.json в проде
+  freshness: {}
+  health: {}
+
+overrides:                        # ручной слой, merge поверх objects[]
+  - id: "cube:Sales/measures/Revenue"
+    description:
+      status: human
+      text: "Выручка в ценах реализации без НДС"
+      needs_review: false
+    owners: ["team-finance"]
+    grain: "день × магазин"
